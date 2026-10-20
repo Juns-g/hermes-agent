@@ -529,7 +529,7 @@ async function resolveDirectoryForIpc(
 }
 
 function relocatedImportedAsset(candidate: string): string {
-  if (fs.existsSync(candidate)) return candidate
+  if (fs.existsSync(candidate)) {return candidate}
   const nativeHome = os.userInfo().homedir
   const roots = [
     path.join(nativeHome, '.hermes', 'assets', 'legacy-paths'),
@@ -537,12 +537,12 @@ function relocatedImportedAsset(candidate: string): string {
   ]
   try {
     const target = JSON.parse(fs.readFileSync(path.join(roots[0], 'relocations.json'), 'utf8'))[candidate]
-    if (typeof target !== 'string') return candidate
+    if (typeof target !== 'string') {return candidate}
     const resolved = fs.realpathSync(target)
     if (!roots.some(root => {
       const relative = path.relative(fs.realpathSync(root), resolved)
       return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))
-    })) return candidate
+    })) {return candidate}
     return resolved
   } catch {
     return candidate
@@ -659,11 +659,11 @@ export {
   enableBasicPasswordStoreEncryption,
   encryptDesktopSecret,
   homeRelativeAttachmentCandidates,
-  relocatedImportedAsset,
   isMissingFileError,
   missingFileResult,
   readFileDataUrlForIpc,
   rejectUnsafePathSyntax,
+  relocatedImportedAsset,
   resolveDirectoryForIpc,
   resolvePersistedRemoteToken,
   resolveReadableFileForIpc,
