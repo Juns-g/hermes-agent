@@ -151,6 +151,12 @@ class SessionState:
     # Per-session allocator for ACP assistant messageIds (lazily created by
     # the server so streamed chunks group into distinct assistant replies).
     message_ids: Any = None
+    background_ready: bool = False
+    background_cancelled: bool = False
+    background_task: Any = None
+    background_seen: set = field(default_factory=set)
+    cancel_generation: int = 0
+    turn_error: str | None = None
 
 
 class SessionManager:
@@ -172,6 +178,16 @@ class SessionManager:
         self._cwd_backfilled = False
 
     # ---- public API ---------------------------------------------------------
+
+    def loaded_sessions(self) -> tuple[SessionState, ...]:
+        """Snapshot live handles without restoring historical conversations."""
+        with self._lock:
+            return tuple(self._sessions.values())
+
+    def loaded_session(self, session_id: str) -> Optional[SessionState]:
+        """Read a live handle without blocking on a cold restore."""
+        with self._lock:
+            return self._sessions.get(session_id)
 
     def create_session(self, cwd: str = ".") -> SessionState:
         """Create a new session with a unique ID and a fresh AIAgent."""
@@ -258,7 +274,7 @@ class SessionManager:
             return None
         state.cwd = cwd
         _register_task_cwd(session_id, cwd)
-        self._persist(state)
+        self._persist(state, sync_history=False)
         # Promote the authoritative column and claim an ordering generation, the
         # same contract tui_gateway/session_workdir.py uses: a git probe may only
         # publish while its generation is still current, so a slow probe for a
@@ -266,13 +282,13 @@ class SessionManager:
         self._schedule_git_metadata(state, self._claim_cwd_generation(state))
         return state
 
-    def save_session(self, session_id: str) -> None:
+    def save_session(self, session_id: str, *, sync_history: bool = True) -> None:
         """Persist a session; called by the server after prompt completion,
         history-mutating slash commands, and model switches."""
         with self._lock:
             state = self._sessions.get(session_id)
         if state is not None:
-            self._persist(state)
+            self._persist(state, sync_history=sync_history)
 
     def end_all_sessions(self, end_reason: str = "acp_disconnect") -> int:
         """Stamp ``ended_at`` on every live session (#118216).
@@ -340,8 +356,8 @@ class SessionManager:
                 logger.debug("ACP session cwd backfill failed", exc_info=True)
         return self._db_instance
 
-    def _persist(self, state: SessionState) -> None:
-        """Create/update the session record, then sync the live message set."""
+    def _persist(self, state: SessionState, *, sync_history: bool = True) -> None:
+        """Create/update the session record, then optionally sync the live message set."""
         db = self._get_db()
         if db is None:
             return
@@ -349,6 +365,8 @@ class SessionManager:
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
         session_meta = {"cwd": state.cwd}
+        if state.background_cancelled:
+            session_meta["background_cancelled"] = True
         for key in ("provider", "base_url", "api_mode"):
             value = getattr(state.agent, key, None)
             if isinstance(value, str) and value.strip():
@@ -388,6 +406,8 @@ class SessionManager:
             # create/fork whose copied history the agent has not flushed yet). That path still rolls back on
             # a mid-rewrite failure so the previously persisted conversation survives (salvaged from
             # #13675).
+            if not sync_history:
+                return
             agent = state.agent
             if getattr(agent, "_session_db", None) is db and getattr(agent, "_session_db_created", False):
                 return
@@ -487,6 +507,7 @@ class SessionManager:
             return None
         state = self._install_state(session_id, agent, cwd, model or getattr(agent, "model", "") or "",
                                     history, persist=False)
+        state.background_cancelled = meta.get("background_cancelled") is True
         logger.info("Restored ACP session %s from DB (%d messages)", session_id, len(history))
         return state
 
@@ -501,8 +522,11 @@ class SessionManager:
             return self._agent_factory()
 
         from run_agent import AIAgent
+        from agent.fast_mode import STATIC_TIERS
         from agent.skill_utils import parse_config_string_list
+        from hermes_cli.cli_config_load import _parse_service_tier_config
         from hermes_cli.config import load_config
+        from hermes_cli.models import resolve_fast_mode_overrides
         from hermes_cli.runtime_provider import resolve_runtime_provider
         from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
         from hermes_constants import resolve_reasoning_config
@@ -534,9 +558,13 @@ class SessionManager:
             # reaches an ACP session and the transport applies its default effort (a 400 on non-reasoning
             # models). Resolved against the session's model so per-model overrides apply.
             "reasoning_config": resolve_reasoning_config(config, model or default_model),
+            "service_tier": _parse_service_tier_config((config.get("agent") or {}).get("service_tier", "")),
         }
         resolve_error: Exception | None = None
         try:
+            if requested_provider == "custom" and base_url:
+                from hermes_cli.runtime_provider_custom import find_custom_provider_identity
+                requested_provider = find_custom_provider_identity(base_url) or requested_provider
             runtime = resolve_runtime_provider(
                 requested=requested_provider or config_provider, target_model=(model or default_model) or None)
             kwargs.update({
@@ -549,6 +577,12 @@ class SessionManager:
             # elsewhere is another endpoint, which must not inherit it.
             if runtime.get("request_overrides") and (not base_url or base_url == runtime.get("base_url")):
                 kwargs["request_overrides"] = runtime["request_overrides"]
+            if kwargs["service_tier"] in STATIC_TIERS:
+                fast_overrides = resolve_fast_mode_overrides(
+                    kwargs["model"], provider=kwargs.get("provider"), base_url=kwargs.get("base_url"),
+                    tier=kwargs["service_tier"])
+                if fast_overrides:
+                    kwargs["request_overrides"] = {**kwargs.get("request_overrides", {}), **fast_overrides}
         except Exception as exc:
             resolve_error = exc
             logger.debug("ACP session falling back to default provider resolution", exc_info=True)

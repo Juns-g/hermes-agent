@@ -166,3 +166,59 @@ async def test_a_terminal_receipt_finishes_the_reply_like_message_complete():
     assert chunks[1].message_id and chunks[1].message_id != chunks[2].message_id
     closed = [u for u in sent if u.session_update == 'tool_call_update']
     assert [(u.tool_call_id, u.status) for u in closed] == [('c1', 'failed')]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('outcome', ['completed', 'failed', 'cancelled'])
+async def test_background_turns_follow_gateway_execution_once(outcome):
+    from acp.schema import ClientCapabilities
+    editor = agent()
+    response = await editor.initialize(client_capabilities=ClientCapabilities(
+        field_meta={'hermes': {'backgroundTurns': 1}}))
+    assert response.agent_capabilities.field_meta['hermes']['backgroundTurns'] == 1
+    editor._cancel_admission = AsyncMock()
+    for aid in ['first', 'second']:
+        await project(editor, 'message.start', {'display_kind': 'internal_notification',
+                                               'display_text': 'Task finished'}, aid=aid)
+        await project(editor, 'message.start', {'display_kind': 'internal_notification',
+                                               'display_text': 'Task finished'}, aid=aid)
+        await project(editor, 'message.delta', {'text': 'reply'}, aid=aid)
+        if outcome == 'cancelled':
+            await editor.cancel('s')
+            editor._cancel_admission.assert_awaited_with('s', aid)
+        await project(editor, 'message.complete', {'text': 'reply', 'outcome': outcome}, aid=aid)
+        await project(editor, 'message.complete', {'text': 'reply', 'outcome': outcome}, aid=aid)
+    events = [call.args[1] for call in editor._conn.ext_notification.await_args_list]
+    assert [(e['turnId'], e['status']) for e in events] == [
+        ('first', 'started'), ('first', outcome), ('second', 'started'), ('second', outcome)]
+    assert all(e['sessionId'] == 's' for e in events)
+    assert all(call.args[0] == 'hermes/background_turn'
+               for call in editor._conn.ext_notification.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_background_lifecycle_requires_negotiation_and_an_automation_turn():
+    from acp.schema import ClientCapabilities
+    editor = agent()
+    await editor.initialize()
+    await project(editor, 'message.start', {'display_kind': 'internal_notification'}, aid='no-capability')
+    await project(editor, 'message.complete', {'outcome': 'completed'}, aid='no-capability')
+    await editor.initialize(client_capabilities=ClientCapabilities(field_meta={'hermes': {'backgroundTurns': 1}}))
+    await project(editor, 'message.start', {}, aid='human')
+    await project(editor, 'message.complete', {'outcome': 'completed'}, aid='human')
+    editor._conn.ext_notification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_gateway_loss_closes_a_visible_background_turn():
+    editor = agent()
+    editor._background_turns_supported = True
+    editor._gateway.events = asyncio.Queue()
+    await project(editor, 'message.start', {'display_kind': 'internal_notification'}, aid='background')
+    failure = RuntimeError('isolated gateway lost')
+    editor._gateway.events.put_nowait(failure)
+    await asyncio.wait_for(editor._events(), 2)
+    assert editor._failure is failure
+    assert not editor._background_turn_ids
+    events = [call.args[1] for call in editor._conn.ext_notification.await_args_list]
+    assert [event['status'] for event in events] == ['started', 'failed']

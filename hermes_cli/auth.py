@@ -823,42 +823,42 @@ def _provider_state_in(store: dict[str, Any], provider_id: str) -> Optional[dict
     return dict(state) if isinstance(state, dict) else None
 
 
+def _provider_auth_file_path(provider_id: Optional[str]) -> Path:
+    if provider_id == "openai-codex":
+        from hermes_cli.auth_codex import codex_auth_file_path
+        return codex_auth_file_path()
+    return _auth_file_path()
+
+
 def _load_provider_state_with_source(
     auth_store: dict[str, Any], provider_id: str,
 ) -> tuple[Optional[dict[str, Any]], Optional[Path]]:
-    """Provider state plus the auth.json path it came from (profile first, then the global root).
+    """Provider state plus the explicitly selected owner auth.json path.
 
-    Refresh paths that rotate single-use OAuth refresh tokens must write the updated chain back to
-    the same store they read."""
+    Profiles are isolated unless they explicitly share Codex with the default owner.
+    Rotating OAuth grants must be written back under that owner's lock."""
+    path = _provider_auth_file_path(provider_id)
+    if path != _auth_file_path():
+        auth_store = _load_auth_store(path)
     state = _provider_state_in(auth_store, provider_id)
-    if state is not None:
-        return state, _auth_file_path()
-    global_state = _provider_state_in(_load_global_auth_store(), provider_id)
-    return (global_state, _global_auth_file_path()) if global_state is not None else (None, None)
+    return (state, path) if state is not None else (None, None)
 
 
 def _load_provider_state(auth_store: dict[str, Any], provider_id: str) -> Optional[dict[str, Any]]:
-    """Provider state; in profile mode falls back to the global-root ``auth.json`` per provider (same
-    shadowing as ``read_credential_pool``), so profile workers see globally-authed providers."""
+    """Provider state from the local profile or its explicit Codex owner."""
     return _load_provider_state_with_source(auth_store, provider_id)[0]
 
 
 @contextmanager
 def _provider_state_transaction(
         provider_id: str, timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS):
-    """Lock the active auth store and any global fallback source, in that order.
+    """Lock the provider owner store and yield ``(store, provider state, source path)``.
 
-    Re-reading the source after its lock is acquired prevents stale refreshes and whole-file lost
-    updates without inverting the documented auth -> shared lock order. ``timeout_seconds`` applies
-    to BOTH locks: a transaction that spans a network call must let waiters outlive that call."""
-    with _auth_store_lock(timeout_seconds):
-        auth_store = _load_auth_store()
-        state, source_path = _load_provider_state_with_source(auth_store, provider_id)
-        if source_path is None or _same_path(source_path, _auth_file_path()):
-            yield auth_store, state, source_path
-            return
-        with _auth_store_lock(timeout_seconds, target_path=source_path):
-            yield auth_store, _provider_state_in(_load_auth_store(source_path), provider_id), source_path
+    ``timeout_seconds`` must let waiters outlive a network call made inside the transaction."""
+    path = _provider_auth_file_path(provider_id)
+    with _auth_store_lock(timeout_seconds, target_path=path):
+        auth_store = _load_auth_store(path)
+        yield (auth_store, _provider_state_in(auth_store, provider_id), path)
 
 
 def _store_provider_state(
@@ -948,28 +948,14 @@ def is_runtime_provider_routable(provider_id: str) -> bool:
 def read_credential_pool(provider_id: Optional[str] = None) -> dict[str, Any]:
     """Return the persisted credential pool, or one provider slice.
 
-    In profile mode the global-root ``auth.json`` is a read-only fallback applied per provider ONLY
-    when the profile has zero entries for it (``hermes auth add`` in the profile shadows global)."""
-    pool = _load_auth_store().get("credential_pool")
+    Provider slices honor explicit Codex sharing. The unfiltered inventory remains local;
+    all other providers read only the active profile's own ``auth.json`` (#111724)."""
+    pool = _load_auth_store(_provider_auth_file_path(provider_id)).get("credential_pool")
     pool = pool if isinstance(pool, dict) else {}
-    global_pool = _load_global_auth_store().get("credential_pool")
-    global_pool = global_pool if isinstance(global_pool, dict) else {}
-
     if provider_id is None:
-        merged = dict(pool)
-        for gp_key, gp_entries in global_pool.items():
-            existing = merged.get(gp_key)
-            if not (isinstance(gp_entries, list) and gp_entries):
-                continue
-            if not (isinstance(existing, list) and existing):  # profile wins when it has ANY entries
-                merged[gp_key] = list(gp_entries)
-        return merged
-
-    provider_entries = pool.get(provider_id)
-    if isinstance(provider_entries, list) and provider_entries:
-        return list(provider_entries)
-    global_entries = global_pool.get(provider_id)
-    return list(global_entries) if isinstance(global_entries, list) else []
+        return dict(pool)
+    entries = pool.get(provider_id)
+    return list(entries) if isinstance(entries, list) else []
 
 
 _POOL_STATUS_FIELDS = (
@@ -1108,8 +1094,9 @@ def write_credential_pool(
     epoch 0) as a stale snapshot and copy a still-binding cooldown back."""
     removed = {rid for rid in (removed_ids or ()) if rid}
     bases = token_bases or {}
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
+    path = _provider_auth_file_path(provider_id)
+    with _auth_store_lock(target_path=path):
+        auth_store = _load_auth_store(path)
         pool = _store_section(auth_store, "credential_pool")
         sanitized = [
             sanitize_borrowed_credential_payload(e, provider_id) if isinstance(e, dict) else e
@@ -1132,7 +1119,7 @@ def write_credential_pool(
             if disk_id and disk_id not in new_ids and disk_id not in removed:
                 merged.append(sanitize_borrowed_credential_payload(disk_entry, provider_id))
         pool[provider_id] = merged
-        _save_auth_store(auth_store)
+        _save_auth_store(auth_store, target_path=path)
         return merged
 
 
@@ -1150,29 +1137,31 @@ def _suppressed_source_list(suppressed: dict[str, Any], provider_id: str) -> Opt
 
 def suppress_credential_source(provider_id: str, source: str) -> None:
     """Mark a credential source as suppressed so it won't be re-seeded."""
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
+    path = _provider_auth_file_path(provider_id)
+    with _auth_store_lock(target_path=path):
+        auth_store = _load_auth_store(path)
         suppressed = _store_section(auth_store, "suppressed_sources")
         provider_list = _suppressed_source_list(suppressed, provider_id)
         if provider_list is None:
             provider_list = suppressed[provider_id] = []
         if source not in provider_list:
             provider_list.append(source)
-        _save_auth_store(auth_store)
+        _save_auth_store(auth_store, target_path=path)
 
 
 def is_source_suppressed(provider_id: str, source: str) -> bool:
     """Check if a credential source has been suppressed by the user."""
     try:
-        return source in _load_auth_store().get("suppressed_sources", {}).get(provider_id, [])
+        return source in _load_auth_store(_provider_auth_file_path(provider_id)).get("suppressed_sources", {}).get(provider_id, [])
     except Exception:
         return False
 
 
 def unsuppress_credential_source(provider_id: str, source: str) -> bool:
     """Clear a suppression marker so the source will be re-seeded on the next load."""
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
+    path = _provider_auth_file_path(provider_id)
+    with _auth_store_lock(target_path=path):
+        auth_store = _load_auth_store(path)
         suppressed = auth_store.get("suppressed_sources")
         if not isinstance(suppressed, dict):
             return False
@@ -1184,7 +1173,7 @@ def unsuppress_credential_source(provider_id: str, source: str) -> bool:
             suppressed.pop(provider_id, None)
         if not suppressed:
             auth_store.pop("suppressed_sources", None)
-        _save_auth_store(auth_store)
+        _save_auth_store(auth_store, target_path=path)
         return True
 
 

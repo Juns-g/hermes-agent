@@ -31,6 +31,7 @@ from hermes_cli.web_deps import late
 from hermes_cli.web_server_files import (
     SANDBOX_NOT_FOUND, _agent_fs_path, _fs_path, _hosted_fs_read_guard, _is_unmapped_container_path,
     _managed_file_entry, _managed_response_meta, _resolve_managed_path,
+    _relocated_imported_asset,
 )
 from hermes_cli.web_models import (
     ChatImageUpload, FsWriteText, ManagedDirectoryCreate, ManagedFileDelete, ManagedFileUpload,
@@ -167,7 +168,8 @@ def _fs_sandbox_not_found_detail(path: Path, profile_home: Optional[Path] = None
 
 
 def _fs_regular_file(path: Path, profile_home: Optional[Path] = None) -> tuple[Path, os.stat_result]:
-    target = _fs_path(str(path))
+    target = _relocated_imported_asset(_fs_path(str(path)))
+    _hosted_fs_read_guard(target)
     try:
         st = target.stat()
     except (FileNotFoundError, NotADirectoryError):

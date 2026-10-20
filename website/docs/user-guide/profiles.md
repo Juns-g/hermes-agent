@@ -102,8 +102,27 @@ hermes profile create backup --clone-all
 Copies **everything** — config, API keys, personality, all memories, skills, plugins. A complete working snapshot. Per-profile history is excluded (session history, `state.db`, `backups/`, `state-snapshots/`, `checkpoints/`) — these belong to the source profile and can reach tens of GB. When cloning from the default profile, the local-model runtime trees (`models/`, `runtimes/`, `node/` — downloaded weights and managed binaries, re-fetched on demand) are skipped too, as `hermes backup` already does. **Cron jobs are not cloned** either: they are scheduled work bound to the source profile and its delivery channel, and a clone that inherited them would run every job twice (two gateways, same job ids). The new profile starts with an empty `cron/`. For a full backup including history and cron jobs, use `hermes profile export` or `hermes backup` instead.
 
 :::note OAuth logins are shared, not copied
-Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use **single-use refresh tokens** — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. `--clone-all` (and the dashboard's credential mirroring) therefore drops those OAuth rows from the clone. The new profile keeps reading the login from the root `~/.hermes/auth.json`, and a token refresh performed inside any profile is written back to root, so all profiles stay signed in. Static API keys are copied as usual. To give a profile its own separate OAuth login, run `hermes -p <name> auth add <provider>` inside it. That login is saved in the profile's own `auth.json`, also when root has no login for the provider yet, and from then on the profile uses it instead of the root login; root's `auth.json` is not changed. If the login cannot be saved, the command fails with an error instead of printing `Added`.
+Anthropic (Claude Pro/Max), OpenAI Codex, and xAI OAuth logins use **single-use refresh tokens** — a copy of one is not a second credential, it is the same credential with two owners, and the first profile to refresh it revokes it for every other copy. `--clone-all` (and the dashboard's credential mirroring) therefore drops those OAuth rows from the clone. For Codex, explicitly opt into the default owner's login with `auth.codex_use_default: true`; its token refresh writes back under that owner's lock. Static API keys are copied as usual. To give a profile its own separate OAuth login, run `hermes -p <name> auth add <provider>` inside it. That login is saved in the profile's own `auth.json`, also when root has no login for the provider yet. If the login cannot be saved, the command fails with an error instead of printing `Added`.
 :::
+
+### Every profile owns its credentials
+
+A named profile resolves providers from **its own** `auth.json` and `.env` by default. It never implicitly inherits the root profile's logins or API keys, and ordinary profile refreshes never write to the root store. A profile with no provider of its own is asked to set one up (`hermes -p <name> model`, or `hermes -p <name> auth add <provider>`) — it does not silently act as the owner. `hermes update` lists every profile that has no provider of its own so a bot never goes quiet unannounced.
+
+To explicitly reuse only the default profile's Codex authorization:
+
+```bash
+hermes -p coder config set auth.codex_use_default true
+```
+
+This selects the default owner's Codex singleton and credential pool, including its refresh
+lock and atomic writeback. No rotating token is copied into the named profile. Other providers,
+model selections, memories and sessions stay independent. Codex account/pool changes affect the
+shared owner; manage login/logout on the default profile. To disconnect just this profile, set
+`auth.codex_use_default false`; its previous local Codex state becomes visible again. Do not
+symlink `auth.json` or copy an OAuth grant. Existing processes need to load code supporting this
+option before it can take effect; restart them at a safe boundary after installing the change.
+
 
 ### Clone from a specific profile
 

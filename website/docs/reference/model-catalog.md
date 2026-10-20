@@ -96,6 +96,25 @@ model_catalog:
 
 The overriding manifest only needs to populate the provider block(s) it cares about. Other providers continue to resolve against the master URL.
 
+### Limiting models in shared pickers
+
+`allowed_models` optionally restricts each provider's model IDs in the shared Desktop, TUI,
+dashboard and ACP inventory. Keys are provider slugs; model IDs match exactly. For example:
+
+```yaml
+model_catalog:
+  allowed_models:
+    openai-codex:
+      - gpt-6.1-sol
+      - gpt-6-astra
+      - gpt-6-luna
+```
+
+Omitting a provider leaves its list unchanged; an empty list hides its models. The current
+selection remains visible even if excluded. This only filters picker visibility: it does not
+add undiscovered models, change discovery caches, switch the selected model, or restrict
+manually supplied IDs, authentication, defaults or scheduled jobs.
+
 ### Hiding providers from the picker
 
 `excluded_providers` lets you hide specific providers from the `/model` picker even when valid credentials exist. Useful when credentials are present for legacy or testing providers that shouldn't appear in normal use (e.g. an old Copilot or OpenRouter token still cached in `auth.json` or discovered via the `gh` CLI).

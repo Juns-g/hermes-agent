@@ -17,6 +17,7 @@ from acp.schema import (
 from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 from hermes_constants import get_hermes_home
 from acp_adapter.gateway_reply import GatewayReplyMixin, _text
+from acp_adapter.gateway_background import GatewayBackgroundMixin
 from acp_adapter.session import _translate_acp_cwd, _normalize_cwd_for_compare
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def _tools_changed_notice(payload):
     return f"Editor MCP tools changed (servers: {servers}); the new tool list applies from the next turn.\n"
 
 
-class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
+class GatewayACPAgent(GatewayReplyMixin, GatewayBackgroundMixin, acp.Agent):
     def __init__(self):
         self._conn = None
         self._gateway = None
@@ -120,6 +121,9 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
         # Session -> the owner's latest usage dict (``session.usage`` / ``session.stats``).
         self._usage = {}
         self._background = set()
+        self._background_turns_supported = False
+        self._background_turn_ids = {}
+        self._background_turn_done = {}
 
     def on_connect(self, conn):
         self._conn = conn
@@ -138,9 +142,14 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
     async def initialize(self, **kwargs):
         from hermes_cli import __version__
         from acp_adapter.auth import build_auth_methods
+        capabilities = kwargs.get('client_capabilities')
+        metadata = getattr(capabilities, 'field_meta', None) or {}
+        hermes = metadata.get('hermes') if isinstance(metadata, dict) else None
+        self._background_turns_supported = isinstance(hermes, dict) and hermes.get('backgroundTurns') == 1
         return InitializeResponse(protocol_version=acp.PROTOCOL_VERSION,
             agent_info=Implementation(name="hermes-agent", version=__version__),
             agent_capabilities=AgentCapabilities(load_session=True,
+                field_meta={'hermes': {'backgroundTurns': 1}},
                 prompt_capabilities=PromptCapabilities(image=True),
                 session_capabilities=SessionCapabilities(fork=SessionForkCapabilities(), list=SessionListCapabilities(),
                                                          resume=SessionResumeCapabilities())),
@@ -441,7 +450,8 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
         session_id = self._aliases.get(session_id, session_id)
         if session_id not in self._snapshots:
             raise GatewayClientError("not_found")
-        admission_id = self._admissions.get(session_id)
+        admission_id = next((aid for sid, aid in self._background_turn_ids if sid == session_id),
+                            self._admissions.get(session_id))
         if admission_id is None:
             if session_id in self._submitting:
                 self._pending_cancels.add(session_id)
@@ -934,11 +944,19 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
             async with self._changed:
                 self._failure = exc
                 self._changed.notify_all()
+            for sid, aid in tuple(self._background_turn_ids):
+                try:
+                    await self._background_turn_end(sid, aid, {'outcome': 'failed', 'error': str(exc)})
+                except Exception:
+                    logger.warning('Could not close ACP background turn after gateway loss', exc_info=True)
 
     async def _project(self, event):
         kind, payload = event.get("type"), event.get("payload", {})
         sid, editor_id = event["session_id"], self._editor_id(event["session_id"])
         aid = event.get("admission_id")
+        if kind == 'message.start':
+            await self._background_turn_start(sid, editor_id, aid, payload)
+            return
         if kind in {"session.info", "session.updated", "session.usage", "session.tools_changed"}:
             await self._project_session_state(kind, sid, editor_id, payload, event)
             return
@@ -983,6 +1001,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
             self._settling.add(aid)
             try:
                 await self._finish_reply(sid, editor_id, aid, payload)
+                await self._background_turn_end(sid, aid, payload)
                 async with self._changed:
                     self._terminals[aid] = payload
                     if len(self._terminals) > 256:

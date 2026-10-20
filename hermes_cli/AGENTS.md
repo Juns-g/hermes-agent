@@ -151,7 +151,8 @@ profile. The multiplex gateway and the Desktop/dashboard `serve` backend instead
 profile per activity via a contextvar override while `os.environ["HERMES_HOME"]` keeps the launch
 profile — a module constant or import-time read there freezes to the launch profile (rules in
 root). Profiles are independent
-islands by design — no live config inheritance; `--clone` copies at creation, minus messaging
+islands by design; only explicit `auth.codex_use_default: true` shares Codex credentials and refresh locks.
+`--clone` copies at creation, minus messaging
 channels (`profile_channels.py`: ownership-based inventory evaluated in the SOURCE's plugin scope —
 adapter-declared keys + canonical/alias prefixes + `GATEWAY_ALLOW*`/`GATEWAY_RELAY_*`; prefixes shared
 with tools (`TWILIO_`/`EMAIL_`, plus a plugin platform's `shared_env_prefixes`) are stripped only when the source runs that adapter; never a hand

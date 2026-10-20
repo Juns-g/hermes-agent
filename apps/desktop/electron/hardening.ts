@@ -528,6 +528,27 @@ async function resolveDirectoryForIpc(
   return { realPath, resolvedPath, stat }
 }
 
+function relocatedImportedAsset(candidate: string): string {
+  if (fs.existsSync(candidate)) return candidate
+  const nativeHome = os.userInfo().homedir
+  const roots = [
+    path.join(nativeHome, '.hermes', 'assets', 'legacy-paths'),
+    path.join(nativeHome, '.paseo', 'attachments', 'legacy-paths')
+  ]
+  try {
+    const target = JSON.parse(fs.readFileSync(path.join(roots[0], 'relocations.json'), 'utf8'))[candidate]
+    if (typeof target !== 'string') return candidate
+    const resolved = fs.realpathSync(target)
+    if (!roots.some(root => {
+      const relative = path.relative(fs.realpathSync(root), resolved)
+      return relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))
+    })) return candidate
+    return resolved
+  } catch {
+    return candidate
+  }
+}
+
 async function resolveReadableFileForIpc(
   filePath,
   options: {
@@ -540,7 +561,7 @@ async function resolveReadableFileForIpc(
 ) {
   const purpose = String(options.purpose || 'File read')
   const fsImpl = options.fs || fs
-  const resolvedPath = resolveRequestedPathForIpc(filePath, { baseDir: options.baseDir, purpose })
+  const resolvedPath = relocatedImportedAsset(resolveRequestedPathForIpc(filePath, { baseDir: options.baseDir, purpose }))
 
   if (options.blockSensitive !== false) {
     rejectSensitiveFilePath(resolvedPath, purpose)
@@ -638,6 +659,7 @@ export {
   enableBasicPasswordStoreEncryption,
   encryptDesktopSecret,
   homeRelativeAttachmentCandidates,
+  relocatedImportedAsset,
   isMissingFileError,
   missingFileResult,
   readFileDataUrlForIpc,

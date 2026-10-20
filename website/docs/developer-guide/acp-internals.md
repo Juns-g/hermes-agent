@@ -12,6 +12,7 @@ Key implementation files:
 
 - `acp_adapter/entry.py`
 - `acp_adapter/server.py`
+- `acp_adapter/notifications.py`
 - `acp_adapter/session.py`
 - `acp_adapter/events.py`
 - `acp_adapter/permissions.py`
@@ -42,6 +43,24 @@ suppresses the local `Operation interrupted: waiting for model response` status
 message; actual partial assistant text remains visible. Terminal outcomes come
 from the gateway's structured execution result, not from assistant prose or a
 session-wide cancellation flag.
+
+## Background completion turns
+
+The default ACP adapter is a gateway viewer. The official gateway owns background
+completion admission, durable FIFO execution, cancellation and replay; the viewer
+must not start a second process-completion poller.
+
+The local Paseo extension negotiates `_meta.hermes.backgroundTurns: 1`. Gateway
+`message.start` events tagged `internal_notification` become
+`_hermes/background_turn` notifications with a session id, admission-backed turn
+id and `started` status. After the final reply is projected, the same turn ends
+with `completed`, `failed` or `cancelled`. Duplicate admissions emit no duplicate
+lifecycle, gateway loss closes visible turns as failed, and Stop targets the
+active background admission rather than the last human input.
+
+Historical messages with the old `hidden` display kind remain excluded from ACP
+replay. The explicitly injected legacy SessionManager adapter retains its older
+compatibility path; it is not the default production execution owner.
 
 ## Major components
 

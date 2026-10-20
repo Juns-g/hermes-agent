@@ -17,6 +17,13 @@ def _mock_agent():
     return MagicMock(name="MockAIAgent")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_payload_manifest(monkeypatch):
+    # These tests run against a checkout, not a sealed PM payload. Importing
+    # run_agent must not probe a manifest beside the checkout in the real home.
+    monkeypatch.setattr("pm.environments._payload_manifest", lambda root: None)
+
+
 @pytest.fixture()
 def manager():
     """SessionManager with a mock agent factory (avoids needing API keys)."""
@@ -255,6 +262,30 @@ class TestCreateSession:
         SessionManager(db=None)._make_agent(session_id="s", cwd=".")
 
         assert seen[0]["credential_pool"] is sentinel_pool
+
+
+    @pytest.mark.parametrize("model,provider,base_url,expected_tier", [
+        ("gpt-6.1-sol", "openai-codex", "https://chatgpt.com/backend-api/codex", "fast"),
+        ("gpt-6.1-sol", "openai-codex", "https://proxy.example/v1", None),
+        ("gpt-5.4-codex", "openai-codex", "https://chatgpt.com/backend-api/codex", None),
+    ])
+    def test_make_agent_inherits_configured_fast_tier(self, monkeypatch, model, provider, base_url, expected_tier):
+        from agent.codex_runtime import _codex_turn_service_tier
+
+        config = {"model": {"default": model, "provider": provider},
+                  "agent": {"reasoning_effort": "high", "service_tier": "fast"}}
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+        monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider",
+                            lambda **_kw: {"provider": provider, "base_url": base_url})
+        monkeypatch.setattr("hermes_cli.mcp_startup.ensure_mcp_discovery_before_agent_build", lambda **_kw: None)
+        with patch("run_agent.AIAgent") as factory:
+            SessionManager(db=None)._make_agent(session_id="new", cwd=".")
+        kwargs = factory.call_args.kwargs
+        assert kwargs["service_tier"] == "priority"
+        assert kwargs["reasoning_config"]["effort"] == "high"
+        assert (kwargs.get("request_overrides") or {}).get("service_tier") == (
+            "priority" if expected_tier else None)
+        assert _codex_turn_service_tier(SimpleNamespace(**kwargs)) == expected_tier
 
 
 
@@ -597,3 +628,25 @@ class TestPersistence:
 
         assert stdout_buf.getvalue() == ""
         assert stderr_buf.getvalue() == "ACP noise\n"
+
+
+def test_restore_named_custom_provider_keeps_endpoint_credentials(tmp_path, monkeypatch):
+    config = {
+        "model": {"provider": "saved-endpoint", "default": "test-model"},
+        "providers": {"saved-endpoint": {
+            "base_url": "https://saved.example.invalid/v1", "api_key": "saved-test-key",
+        }},
+    }
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+    monkeypatch.setattr("hermes_cli.runtime_provider.load_config", lambda: config)
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("restored", "acp", model="test-model", model_config={
+        "cwd": str(tmp_path), "provider": "custom",
+        "base_url": "https://saved.example.invalid/v1", "api_mode": "chat_completions",
+    })
+    with patch("run_agent.AIAgent", side_effect=lambda **kw: SimpleNamespace(**kw)) as factory:
+        state = SessionManager(db=db).get_session("restored")
+    assert state is not None
+    assert factory.call_args.kwargs["base_url"] == "https://saved.example.invalid/v1"
+    assert factory.call_args.kwargs["api_key"] == "saved-test-key"
+    db.close()

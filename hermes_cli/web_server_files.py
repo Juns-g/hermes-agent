@@ -3,6 +3,7 @@
 
 import logging
 import mimetypes
+import json
 import os
 import stat
 import urllib.request
@@ -208,6 +209,28 @@ def _is_unmapped_container_path(raw: str, *, profile_home: Path | None = None) -
     return any(raw == r or raw.startswith(r.rstrip("/") + "/") for r in roots)
 
 
+def _relocated_imported_asset(candidate: Path) -> Path:
+    """Read-only fallback for exact attachment paths retained during a local import."""
+    if candidate.exists():
+        return candidate
+    from hermes_constants import get_default_hermes_root
+
+    home = get_default_hermes_root().expanduser().resolve()
+    assets = home / "assets" / "legacy-paths"
+    try:
+        target = json.loads((assets / "relocations.json").read_text(encoding="utf-8-sig")).get(str(candidate))
+        if not isinstance(target, str):
+            return candidate
+        resolved = Path(target).resolve(strict=True)
+        # Imports may include attachments owned by the co-installed Paseo reader.
+        roots = [assets.resolve(), (home.parent / ".paseo" / "attachments" / "legacy-paths").resolve()]
+        if not any(resolved == root or root in resolved.parents for root in roots):
+            return candidate
+        return resolved
+    except (OSError, ValueError, TypeError):
+        return candidate
+
+
 def _canonical_path(path: Path, *, require_exists: bool = False) -> Path:
     try:
         return path.expanduser().resolve(strict=require_exists)
@@ -331,6 +354,9 @@ def _resolve_managed_path(
 
     if ".." in candidate.parts:
         raise HTTPException(status_code=400, detail="Path cannot contain '..'")
+
+    if not for_write:
+        candidate = _relocated_imported_asset(candidate)
 
     if for_write and not candidate.exists():
         parent = _canonical_path(candidate.parent)

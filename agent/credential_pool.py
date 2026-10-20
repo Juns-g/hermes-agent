@@ -36,6 +36,7 @@ from hermes_cli.auth import (
     PROVIDER_REGISTRY,
     SINGLE_USE_REFRESH_POOL_PROVIDERS,
     _auth_store_lock,
+    _provider_auth_file_path,
     _codex_access_token_is_expiring,
     _decode_jwt_claims,
     _global_auth_file_path,
@@ -797,20 +798,8 @@ def _store_owns_pool_provider(auth_store: dict[str, Any], provider: str) -> bool
 
 
 def _profile_owns_pool_provider(provider: str) -> bool:
-    """True when the ACTIVE auth.json has its own rows for *provider*.
-
-    Named profiles with no local rows read the provider through the
-    ``read_credential_pool`` global-root fallback ("borrowing").
-    """
-    # Classic mode (profile == root) has no root fallback, so the answer is always "owns";
-    # skip the per-call auth.json re-read on this hot load_pool path.
-    if auth_mod._global_auth_file_path() is None:
-        return True
-    try:
-        auth_store = _load_auth_store()
-    except Exception:
-        return True  # unreadable store: assume ownership, keep legacy path
-    return _store_owns_pool_provider(auth_store, provider)
+    """Pool reads and writes select the same explicit owner; no implicit borrowing."""
+    return True
 
 
 def _borrowed_single_use_pool_root() -> Optional[Path]:
@@ -1322,8 +1311,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         if entry.source not in sources:
             return entry
         try:
-            with _auth_store_lock():
-                state = _load_provider_state(_load_auth_store(), self.provider)
+            with _auth_store_lock(target_path=_provider_auth_file_path(self.provider)):
+                state = _load_provider_state(_load_auth_store(_provider_auth_file_path(self.provider)), self.provider)
             tokens = state.get("tokens") if isinstance(state, dict) else None
             if not isinstance(tokens, dict):
                 return entry
@@ -1442,22 +1431,15 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         if entry.source != "device_code" or self.provider not in ("nous", *_TOKENS_SINGLETON_PROVIDERS):
             return
         try:
-            with _auth_store_lock():
-                auth_store = _load_auth_store()
-                state, source_path = _load_provider_state_with_source(auth_store, self.provider)
+            with _auth_store_lock(target_path=_provider_auth_file_path(self.provider)):
+                auth_store = _load_auth_store(_provider_auth_file_path(self.provider))
+                state = _load_provider_state(auth_store, self.provider)
                 if not isinstance(state, dict):
                     return
-                global_root = _global_auth_file_path()
-                is_from_root = bool(
-                    source_path is not None and global_root is not None and _same_path(source_path, global_root)
-                )
                 if not self._apply_entry_to_singleton_state(entry, state):
                     return
-                if is_from_root:
-                    _write_through_provider_state_to_global_root(self.provider, state)
-                else:
-                    _store_provider_state(auth_store, self.provider, state, set_active=False)
-                    _save_auth_store(auth_store)
+                _store_provider_state(auth_store, self.provider, state, set_active=False)
+                _save_auth_store(auth_store, target_path=_provider_auth_file_path(self.provider))
         except Exception as exc:
             logger.debug("Failed to sync %s pool entry back to auth store: %s", self.provider, exc)
 
@@ -1505,7 +1487,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # there was no recovery path at all). Serialize through the shared
         # cross-process auth-store flock; a waiter's in-lock re-sync picks up
         # the winner's rotated token and skips the POST.
-        with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
+        with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout(),
+                              target_path=_provider_auth_file_path(self.provider)):
             if self.provider == "openai-codex":
                 synced = self._sync_entry_from_auth_store(entry)
                 if synced is not entry and not force and not self._entry_needs_refresh(synced):
@@ -1855,8 +1838,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         """Drop the dead Codex/xAI token pair from auth.json unless a peer already rotated it."""
         display = _TOKENS_SINGLETON_PROVIDERS[self.provider][1]
         try:
-            with _auth_store_lock():
-                auth_store = _load_auth_store()
+            with _auth_store_lock(target_path=_provider_auth_file_path(self.provider)):
+                auth_store = _load_auth_store(_provider_auth_file_path(self.provider))
                 state = _load_provider_state(auth_store, self.provider) or {}
                 tokens = (state.get("tokens") or {}) if isinstance(state, dict) else None
                 if isinstance(tokens, dict):
@@ -1874,7 +1857,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                             "at": datetime.now(UTC).isoformat(),
                         }
                         _save_provider_state(auth_store, self.provider, state)
-                        _save_auth_store(auth_store)
+                        _save_auth_store(auth_store, target_path=_provider_auth_file_path(self.provider))
         except Exception as clear_exc:
             logger.debug("Failed to clear terminal %s OAuth state: %s", display, clear_exc)
 

@@ -1662,7 +1662,6 @@ DEFAULT_CONFIG = {
         "allowed_channels": "",  # if set, ONLY respond in these channel IDs (whitelist)
         "channel_prompts": {},  # per-channel ephemeral system prompts
     },
-
     "matrix": {
         "require_mention": True,  # require @mention to respond in rooms
         "free_response_rooms": "",  # comma-separated room IDs answered without mention
@@ -1767,6 +1766,7 @@ DEFAULT_CONFIG = {
     # "tone", "style"}}.
     "personalities": {},
     "auth": {  # Login policy (credentials themselves live in auth.json / .env).
+        "codex_use_default": False,
         # Borrow and refresh the Codex CLI (~/.codex/auth.json) and Claude Code (~/.claude/.credentials.json)
         # logins automatically when Hermes has no usable login of its own. Their refresh tokens are single-use
         # and rotate, so two programs on one login can log each other out; set false to make Hermes use only
@@ -1811,7 +1811,6 @@ DEFAULT_CONFIG = {
         # the base set (restricted/audited/air-gapped environments).
         "allow_lazy_installs": True,
     },
-
     "cron": {
         "catch_up_missed": True,  # False skips recurring misses beyond the local grace window.
         # Let cron-spawned agents use the cronjob toolset (the "cron-librarian" pattern). Off by
@@ -2062,6 +2061,7 @@ DEFAULT_CONFIG = {
         # Per-provider override URLs for self-hosted curation lists using the same schema, e.g.
         # providers: {openrouter: {url: https://example.com/my-curation.json}}.
         "providers": {},
+        "allowed_models": {},
     },
     # Per-model metadata overrides. Fields: context_window, supports_tools,
     # supports_vision, supports_reasoning, model_family. <provider>.<model_id> wins over

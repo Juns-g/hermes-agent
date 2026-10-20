@@ -297,7 +297,7 @@ import {
   DEFAULT_FETCH_TIMEOUT_MS,
   enableBasicPasswordStoreEncryption,
   encryptDesktopSecret as encryptDesktopSecretStrict,
-  homeRelativeAttachmentCandidates,
+  homeRelativeAttachmentCandidates, relocatedImportedAsset,
   isMissingFileError,
   missingFileResult,
   readFileDataUrlForIpc,
@@ -5797,10 +5797,10 @@ async function previewFileTarget(rawTarget, baseDir) {
   // A plain backend target is a WSL/POSIX path; bridge it to a Windows-
   // accessible form before resolving so the existence checks below (and the
   // final read) hit the real file rather than a drive-relative C:\home\... miss.
-  let resolved = resolveRequestedPathForIpc(resolvePreviewTargetPath(raw, expandUserPath), {
+  let resolved = relocatedImportedAsset(resolveRequestedPathForIpc(resolvePreviewTargetPath(raw, expandUserPath), {
     baseDir: base,
     purpose: 'Preview target'
-  })
+  }))
 
   // Attachment references stored in chat history are frequently HOME-relative
   // (e.g. "AppData/Local/hermes/attachments/foo.xlsx" on Windows, or
