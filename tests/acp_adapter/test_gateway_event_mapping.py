@@ -33,6 +33,58 @@ async def project(agent, kind, payload, aid='a'):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('streamed', ['', 'Final ', 'Final answer.'])
+@pytest.mark.parametrize('reasoning_mode', ['streamed', 'unstreamed', 'hidden'])
+async def test_local_final_and_native_thought_preserve_display(monkeypatch, tmp_path, streamed, reasoning_mode):
+    """Only live reasoning events produce thoughts; completion metadata cannot override hide."""
+    import gateway.run as gateway_run
+    from gateway import session_setting_commands
+    from gateway.config import Platform
+    from gateway.run_turn_persistence import GatewayTurnPersistenceMixin
+    from gateway.session_settlement_recovery import completion_payload
+    from tests.gateway.test_local_viewer_reasoning import _wired
+
+    monkeypatch.setattr(gateway_run, '_load_gateway_config', lambda: {'display': {'show_reasoning': True}})
+    monkeypatch.setattr(session_setting_commands, 'local_policy', lambda *args: SimpleNamespace(source='acp'))
+    editor = agent()
+    result = {'local_viewer': True, 'last_reasoning': 'weigh it'}
+    _, model, published, scope = _wired(tmp_path, 'acp', {}, reasoning_mode != 'hidden')
+    try:
+        if reasoning_mode != 'unstreamed' and model.reasoning_callback is not None:
+            model.reasoning_callback('weigh it')
+    finally:
+        scope.__exit__(None, None, None)
+    for kind, data in published:
+        await project(editor, kind, data)
+    if streamed:
+        await project(editor, 'message.delta', {'text': streamed})
+    final = GatewayTurnPersistenceMixin()._hmwa_prepend_reasoning(
+        result, 'Final answer.', SimpleNamespace(platform=Platform.LOCAL), False)
+    payload = completion_payload({'admission_id': 'a', 'request_id': 'r'}, {'outcome': 'completed'},
+                                 final, {'result': result})
+    await project(editor, 'message.complete', payload)
+    assert payload['reasoning'] == 'weigh it'
+    thought = 'weigh it' if reasoning_mode == 'streamed' else ''
+    for kind, expected in [('agent_message_chunk', 'Final answer.'), ('agent_thought_chunk', thought)]:
+        assert ''.join(u.content.text for u in updates(editor) if u.session_update == kind) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('receipt', [False, True])
+async def test_a_transformed_final_keeps_its_full_text_even_when_it_contains_the_stream(receipt):
+    """A corrected answer must survive intact; matching an embedded streamed body is not deduplication."""
+    editor = agent()
+    await project(editor, 'message.delta', {'text': 'original answer'})
+    final = 'Corrected: original answer, with an important qualification.'
+    if receipt:
+        editor._gateway.rpc.return_value = {'result': {'final_response': final}}
+        await editor._settled_receipt(editor._gateway, 's', 's', {'admission_id': 'a', 'outcome': 'completed'})
+    else:
+        await project(editor, 'message.complete', {'text': final, 'outcome': 'completed', 'response_transformed': True})
+    assert ''.join(u.content.text for u in updates(editor)) == 'original answer\n\n' + final
+
+
+@pytest.mark.asyncio
 async def test_todo_updated_becomes_the_native_plan_update():
     """The owner publishes ``todo.updated`` for a local viewer's turn (an ACP session is LOCAL);
     the in-process agent sent Zed's task panel a ``plan`` update from the todo result."""
