@@ -177,8 +177,10 @@ def _fs_sandbox_not_found_detail(path: Path, profile_home: Optional[Path] = None
 def _fs_regular_file(path: Path, profile_home: Optional[Path] = None) -> tuple[Path, os.stat_result]:
     # The caller already resolved *path* (a file: URL decoded once); decoding it again here would
     # read the name report%2fsecret.txt as report/secret.txt.
-    target = _relocated_imported_asset(_fs_path(str(path), decode_fallback=False))
-    _hosted_fs_read_guard(target)
+    original = _fs_path(str(path), decode_fallback=False)
+    target = _relocated_imported_asset(original)
+    if target != original:
+        _hosted_fs_read_guard(target)
     try:
         st = target.stat()
     except (FileNotFoundError, NotADirectoryError):

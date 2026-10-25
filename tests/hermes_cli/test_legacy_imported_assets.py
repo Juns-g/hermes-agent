@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from fastapi import HTTPException
 
 from hermes_cli.web_server_files import _relocated_imported_asset
 from hermes_cli.web_routers.files import _fs_regular_file
@@ -28,6 +29,11 @@ def test_exact_import_mapping_reads_retained_assets_and_refuses_escape(tmp_path,
     target, metadata = _fs_regular_file(old)
     assert target == retained
     assert metadata.st_size == len(b'original attachment')
+    with monkeypatch.context() as locked:
+        locked.setenv('HERMES_DASHBOARD_FILES_ROOT', str(old.parent))
+        with pytest.raises(HTTPException) as denied:
+            _fs_regular_file(old)
+        assert denied.value.status_code == 403
     outside = tmp_path / 'outside.png'
     outside.write_bytes(b'unrelated private file')
     point_at(outside)
