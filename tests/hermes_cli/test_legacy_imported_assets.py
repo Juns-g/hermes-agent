@@ -4,6 +4,7 @@ import json
 import pytest
 
 from hermes_cli.web_server_files import _relocated_imported_asset
+from hermes_cli.web_routers.files import _fs_regular_file
 
 
 @pytest.mark.parametrize('owner', ['hermes', 'paseo'])
@@ -24,6 +25,9 @@ def test_exact_import_mapping_reads_retained_assets_and_refuses_escape(tmp_path,
 
     point_at(retained)
     assert _relocated_imported_asset(old).read_bytes() == b'original attachment'
+    target, metadata = _fs_regular_file(old)
+    assert target == retained
+    assert metadata.st_size == len(b'original attachment')
     outside = tmp_path / 'outside.png'
     outside.write_bytes(b'unrelated private file')
     point_at(outside)
