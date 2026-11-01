@@ -116,7 +116,9 @@ always-on-top overlays, OS-window inspection, external-terminal launch and the u
 
 Chats written before the gateway owned sessions show their history but cannot be continued from the
 browser until they are adopted: run `hermes sessions adopt` once on the host (`hermes -p <profile>
-sessions adopt` for another profile), or open them once in the native Desktop, TUI or CLI.
+sessions adopt` for another profile), or open them once in the native Desktop, TUI or CLI. A chat an
+older GUI client created under its own label (such as `mobile`) stays read-only until you claim that
+exact chat on the host: `hermes sessions adopt --gui <session id>` (add `--dry-run` to check it first).
 
 ### Open it from your phone or another computer
 

@@ -57,10 +57,39 @@ def adoptable_sessions(path) -> list[dict]:
         db.close()
 
 
-async def adopt_sessions(rows, *, report=print) -> tuple[int, Counter]:
+def claimable_gui_sessions(path, ids) -> tuple[list[dict], list[str]]:
+    """``(rows, refused ids)`` for an explicit ``--gui`` claim: each named id read-only against the
+    owner's own GUI-claim rule (``validate_legacy_gui_row``) as this host's owner. Never a scan: a
+    GUI label alone proves nothing, so only ids the owner names are offered. A row already claimed is
+    offered again; the owner answers its existing binding."""
+    from gateway.owner_identity import host_owner_subject
+    from hermes_state import SessionDB
+    from hermes_state_local_migration import gui_claimed, validate_legacy_gui_row
+    from hermes_state_runtime import RuntimeStoreError
+
+    db = SessionDB(db_path=path, read_only=True)
+    try:
+        rows, refused = [], []
+        for sid in dict.fromkeys(ids):
+            row = db.get_session(sid)
+            try:
+                if row is None:
+                    raise RuntimeStoreError('not_found')
+                if not gui_claimed(db, row):
+                    validate_legacy_gui_row(db, row, subject=host_owner_subject())
+            except RuntimeStoreError:
+                refused.append(sid)
+                continue
+            rows.append(row)
+        return rows, refused
+    finally:
+        db.close()
+
+
+async def adopt_sessions(rows, *, report=print, gui=False) -> tuple[int, Counter]:
     """Resume each row once over this host's native connection (the owner adopts it), then detach
     without ending it. ``(adopted, skipped-by-refusal)``; a row the owner refuses is skipped,
-    never retried as another principal."""
+    never retried as another principal. *gui*: each resume is the explicit GUI claim."""
     from hermes_cli.gateway_client import GatewayRPCError, connect_gateway
     from hermes_cli.web_server_boundary import _DESKTOP_ATTACHMENT_WS_MAX_BYTES
 
@@ -69,7 +98,8 @@ async def adopt_sessions(rows, *, report=print) -> tuple[int, Counter]:
     async with connect_gateway(max_size=_DESKTOP_ATTACHMENT_WS_MAX_BYTES) as client:
         for done, row in enumerate(rows, 1):
             try:
-                snapshot = await client.rpc('session.resume', session_id=row['id'])
+                snapshot = await client.rpc('session.resume', session_id=row['id'],
+                                            **({'adopt_legacy_gui': True} if gui else {}))
             except GatewayRPCError as exc:
                 skipped[_refusal(exc)] += 1
                 continue
@@ -120,9 +150,16 @@ def cmd_adopt(args) -> int:
         print(f'No session database at {display_hermes_home()}/state.db (nothing to adopt).')
         return 0
     try:
-        rows = adoptable_sessions(path)
+        if args.gui:
+            rows, refused = claimable_gui_sessions(path, args.gui)
+        else:
+            rows, refused = adoptable_sessions(path), []
     except sqlite3.Error as exc:
         print(_unreadable_store(exc, f'{display_hermes_home()}/state.db'), file=sys.stderr)
+        return 1
+    for sid in refused:
+        print(f'Not claimable here: {sid} (not a GUI chat stamped with this host owner\'s login).', file=sys.stderr)
+    if args.gui and refused:
         return 1
     if not rows:
         print('Nothing to adopt: every local chat in this profile already belongs to its gateway.')
@@ -133,7 +170,7 @@ def cmd_adopt(args) -> int:
         print('Dry run: nothing was adopted.')
         return 0
     try:
-        adopted, skipped = asyncio.run(adopt_sessions(rows))
+        adopted, skipped = asyncio.run(adopt_sessions(rows, gui=bool(args.gui)))
     except (GatewayClientError, OSError, TimeoutError, WebSocketException) as exc:
         message = str(exc) if isinstance(exc, GatewayClientError) else 'Gateway connection/read failed'
         print('Error: ' + message, file=sys.stderr)
@@ -152,3 +189,6 @@ def add_adopt_parser(sessions_subparsers) -> None:
             "clients such as the Webapp can continue them. Run it as the gateway's OS user; use "
             "`hermes -p <profile> sessions adopt` for another profile.")
     parser.add_argument('--dry-run', action='store_true', help='Only count what would be adopted')
+    parser.add_argument('--gui', action='append', metavar='SESSION_ID',
+                        help="Claim this exact chat an older GUI client (Herald) created under its own label; "
+                             "repeat for several. Refuses any id not stamped with this host owner's login")

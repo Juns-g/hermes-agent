@@ -235,14 +235,44 @@ def _endpoint_owner(saved, config):
                             detail=f'{identity} no longer serves the saved endpoint; select a model to continue')
 
 
-def adopt_legacy_session(authority, actor, row):
+def claim_legacy_gui_session(connection, sid):
+    """The owner's explicit claim of one pre-authority GUI client's chat (``LEGACY_GUI_LABELS``):
+    adopted in place, under its own id, history and label, exactly as a native open adopts old CLI
+    history. Only this host's own native ticket for this profile claims, as the owner whose login
+    stamped the row; a login (Webapp, dashboard, forwarded) never does. An open without the claim keeps
+    the read-only mount, and a repeated claim of a row it bound answers that binding."""
+    authority, actor = connection.authority, connection.actor
+    from gateway.owner_identity import host_owner_subject
+    if (not connection.native_owner or connection._identity.get('provider') != 'local'
+            or connection._identity.get('user_id') != host_owner_subject() or actor.subject != host_owner_subject()):
+        raise RuntimeStoreError('permission_denied')
+    row = authority.db.get_session(sid)
+    if row is None:
+        raise RuntimeStoreError('not_found')
+    from hermes_state_local_migration import gui_claimed, validate_legacy_gui_row
+    if gui_claimed(authority.db, row):
+        return resolve_local_target(authority, actor, sid)
+    validate_legacy_gui_row(authority.db, row, subject=actor.subject)
+    from gateway.session_history_mount import is_history_mount
+    live = authority.sessions.get(sid)
+    if live is not None:
+        if not is_history_mount(live):
+            raise RuntimeStoreError('admission_conflict')
+        # The read-only mount an unclaimed open left: nothing runs through it (no route, no admission),
+        # and the claim's restore below publishes the conversation's writable mount in its place.
+        del authority.sessions[sid]
+    return adopt_legacy_session(authority, actor, row, gui_claim=True)
+
+
+def adopt_legacy_session(authority, actor, row, *, gui_claim=False):
     if actor.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
     if (getattr(authority, '_native_legacy_transports', {}).get(actor.transport_id) != actor
             or not {'session:read', 'session:create'} <= actor.capabilities):
         raise RuntimeStoreError('not_found')
-    from hermes_state_local_migration import LEGACY_CREATION_SOURCES, validate_legacy_row
-    validate_legacy_row(authority.db, row, subject=actor.subject)
+    from hermes_state_local_migration import (
+        GUI_CLAIM_PREFIX, LEGACY_CREATION_SOURCES, validate_legacy_gui_row, validate_legacy_row)
+    (validate_legacy_gui_row if gui_claim else validate_legacy_row)(authority.db, row, subject=actor.subject)
     authority._require_admission_open()
     from gateway.run import _load_gateway_config, _resolve_gateway_model
     from gateway.session_policy import build_policy, bind_launch_key
@@ -250,7 +280,7 @@ def adopt_legacy_session(authority, actor, row):
     from hermes_state_local import commit_local_session
     from hermes_cli.active_sessions import active_session_liveness_guard, ActiveSessionRegistryError
 
-    request_id = 'legacy:' + row['id']
+    request_id = (GUI_CLAIM_PREFIX if gui_claim else 'legacy:') + row['id']
     sid = row['id']
     params, api_mode = legacy_launch_params(row)
     params['source'] = LEGACY_CREATION_SOURCES.get(row['source'], row['source'])

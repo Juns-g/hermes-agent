@@ -13,8 +13,13 @@ LEGACY_PREFIX = 'gateway.local_legacy.v1:'
 # ``desktop`` is the label main's Desktop stored; it is adopted as the ``gui`` creation source.
 # ``acp`` is main's in-process editor server (Zed, VS Code, JetBrains): adopted under its own source.
 LEGACY_LOCAL_SOURCES = frozenset({'cli', 'tui', 'gui', 'desktop', 'oneshot', 'tool', 'acp'})
+# Labels a pre-authority GUI WebSocket client chose for its own ``session.create`` (Herald's ``mobile``):
+# the standalone backend stored any caller label. Never adopted on open, where the same label may be a
+# foreign writer's: only the owner's explicit claim of one id binds such a row (``GUI_CLAIM_PREFIX``).
+LEGACY_GUI_LABELS = frozenset({'mobile'})
+GUI_CLAIM_PREFIX = 'legacy-gui:'
 # Legacy labels that are not creation sources of their own (session_policy.SURFACES).
-LEGACY_CREATION_SOURCES = {'desktop': 'gui'}
+LEGACY_CREATION_SOURCES = {'desktop': 'gui', 'mobile': 'gui'}
 
 
 def legacy_account_label(row):
@@ -53,6 +58,26 @@ def validate_legacy_row(db, row, *, subject=None):
         raise RuntimeStoreError('not_found')
 
 
+def validate_legacy_gui_row(db, row, *, subject):
+    """A row an explicit GUI claim may bind: created and still labelled by a pre-authority GUI client,
+    unrouted, no delegate, this profile's, and stamped with *subject*'s own login. An unstamped row
+    names no owner, so knowing its id is not ownership."""
+    if (row['source'] not in LEGACY_GUI_LABELS or row.get('created_source') != row['source']
+            or row.get('parent_session_id') or not row.get('user_id') or not login_owned_by(row, subject)
+            or any(row.get(k) for k in ('session_key', 'chat_id', 'origin_json'))
+            or row.get('profile_name') not in (None, '', db._own_profile_name() or 'default')):
+        raise RuntimeStoreError('not_found')
+
+
+def gui_claimed(db, row):
+    """Whether *row* is a GUI-labelled conversation an owner claim bound (its legacy binding exists)."""
+    if row.get('source') not in LEGACY_GUI_LABELS:
+        return False
+    with db._read_ctx() as conn:
+        return conn.execute('SELECT 1 FROM state_meta WHERE key=?',
+                            (LEGACY_PREFIX + (row.get('chat_id') or row['id']),)).fetchone() is not None
+
+
 def bind_legacy_target(db, conn, receipt):
     target = receipt['legacy_session_id']
     if target != receipt['session_id']:
@@ -60,7 +85,10 @@ def bind_legacy_target(db, conn, receipt):
     row = conn.execute('SELECT * FROM sessions WHERE id=?', (target,)).fetchone()
     if row is None:
         raise RuntimeStoreError('not_found')
-    validate_legacy_row(db, dict(row), subject=receipt['principal_id'])
+    if receipt.get('request_id') == GUI_CLAIM_PREFIX + target:
+        validate_legacy_gui_row(db, dict(row), subject=receipt['principal_id'])
+    else:
+        validate_legacy_row(db, dict(row), subject=receipt['principal_id'])
     from hermes_state_mutation_binding import BINDING_PREFIX, binding_names
     imported = conn.execute('SELECT value FROM state_meta WHERE key=?', (BINDING_PREFIX + target,)).fetchone()
     if imported and not binding_names(imported[0], receipt['profile_id'], receipt['principal_id']):

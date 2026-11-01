@@ -610,7 +610,13 @@ class AuthorityConnection:
         from gateway.session_local_inventory import snapshot_info
         replay_from = self.replay_cursors.pop(ref.session_id, None)
         requested = ref.session_id
-        if 'latest' in params:
+        if params.get('adopt_legacy_gui') is True:
+            # The owner's explicit claim of one exact pre-authority GUI chat (``hermes sessions adopt --gui``).
+            if 'latest' in params or 'title' in params:
+                raise RuntimeStoreError('invalid_params', field='adopt_legacy_gui')
+            from gateway.session_local_migration import claim_legacy_gui_session
+            ref = claim_legacy_gui_session(self, ref.session_id)
+        elif 'latest' in params:
             # Bare `-c` / `--resume latest`: the most recent session of that surface family the
             # actor may read (workspace first), resolved by the owner like a title.
             from gateway.session_local_title import resolve_latest_session
@@ -629,14 +635,15 @@ class AuthorityConnection:
                     ref = SessionRef(ref.profile_id, resolved_id)
             from gateway.session_local_migration import resolve_local_target
             from gateway.session_policy_refresh import refresh_settled
-            from hermes_state_local_migration import LEGACY_LOCAL_SOURCES
+            from hermes_state_local_migration import LEGACY_LOCAL_SOURCES, gui_claimed
             # Another viewer's refresh mid-cleanup has committed a policy it has not published yet.
             await refresh_settled(self.authority, ref.session_id)
             row = self.authority.db.get_session(ref.session_id)
             # Canonical LOCAL compression/reset segments keep the receipt on their logical
             # owner, not on the physical transcript ID the history picker / Desktop supplies
-            # after list_sessions projects the tip (#139306).
-            if row and row['source'] in LEGACY_LOCAL_SOURCES | {Platform.LOCAL.value}:
+            # after list_sessions projects the tip (#139306). A claimed GUI chat keeps its label.
+            if row and (row['source'] in LEGACY_LOCAL_SOURCES | {Platform.LOCAL.value}
+                        or gui_claimed(self.authority.db, row)):
                 ref = resolve_local_target(self.authority, self.actor,
                     self.authority.db.get_compression_tip(ref.session_id) or ref.session_id)
             elif row:

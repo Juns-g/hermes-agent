@@ -9569,6 +9569,19 @@
             "default": false,
             "title": "Display Projection",
             "type": "boolean"
+          },
+          "adopt_legacy_gui": {
+            "anyOf": [
+              {
+                "const": true,
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Adopt Legacy Gui"
           }
         },
         "title": "CanonicalResumeParams",
