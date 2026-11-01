@@ -72,6 +72,9 @@ class CanonicalResumeParams(ProfileParams):
     # A renderer (the Ink TUI) asks for main's display projection of the same rows
     # (``tui_gateway.session_history._history_to_messages``) as ``display_messages``.
     display_projection: bool = False
+    # The owner's explicit claim of this exact pre-authority GUI chat (``hermes sessions adopt --gui``):
+    # native host owner only (``gateway/session_local_migration.py::claim_legacy_gui_session``).
+    adopt_legacy_gui: Literal[True] | None = None
 
 
 class CanonicalSessionHandle(Result):
