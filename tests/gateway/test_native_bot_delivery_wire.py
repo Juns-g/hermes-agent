@@ -11,7 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 from tests.gateway.test_legacy_gui_claim import SID, _herald_chat, _transcript
-from tests.gateway.test_peer_dm_bot_chat_headless import headless
+from tests.gateway.test_peer_dm_bot_chat_headless import headless as _headless_fixture
+
+headless = _headless_fixture
 
 
 @pytest.mark.asyncio
